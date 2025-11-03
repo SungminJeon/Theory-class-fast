@@ -25,7 +25,7 @@ SRCS_COMMON := Topology.cpp TopologyDB.cpp TopoLineCompact.cpp Tensor.C
 OBJS_COMMON := $(SRCS_COMMON:.cpp=.o)
 
 GEN_SRCS  := topology_generator.cpp
-DECO_SRCS := decorate_generator.cpp
+DECO_SRCS := decorate_generator_fast.cpp
 CLSF_SRCS := classify_topology.cpp
 
 GEN_OBJS  := $(GEN_SRCS:.cpp=.o)

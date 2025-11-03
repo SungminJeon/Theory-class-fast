@@ -13,13 +13,14 @@
 #include "Topology.h"
 #include "TopologyDB.hpp"
 #include "TopoLineCompact.hpp"
+#include "Theory.h"
 #include <unordered_set>
 #include <unordered_map>
 #include <sstream>
 
-// ========== 설정 ==========
+// ========== Configuration ==========
 static constexpr size_t BUFFER_SIZE = 64u << 20;      // 64MB per buffer
-static constexpr size_t BATCH_SIZE = 10000;           // 배치당 토폴로지 수
+static constexpr size_t BATCH_SIZE = 10000;           // Topologies per batch
 static constexpr int MAX_DECO_PER_NODE = 3;
 
 struct TargetSpec {
@@ -31,7 +32,7 @@ struct TargetSpec {
 
 enum class InFmt {Auto, DB, Line};
 
-// ========== 글루잉 룰 (원본 유지) ==========
+// ========== Gluing rules (original) ==========
 static inline const std::vector<int>& allowed_S_params(int gval){
     static std::vector<int> dummy;
     static const std::vector<int> S_g4 = {1,882,883,22,32,23,33,42,991,9920,9902,92,93,97,98,912,915,916,917,331,43,53,99910,9913,924,925,927,928,929,934,936,937,938,940,941,942,943,956};
@@ -68,7 +69,135 @@ static inline const std::vector<int>& allowed_I_params(int gval){
     }
 }
 
-// ========== 샤딩 유틸 ==========
+// ========== ✨ ADDED: Topology to TheoryGraph conversion ==========
+TheoryGraph topology_to_theory_graph(const Topology& T) {
+    TheoryGraph G;
+    
+    if (T.block.empty()) return G;
+    
+    std::vector<NodeRef> nodes;
+    nodes.reserve(T.block.size());
+    
+    for (const auto& b : T.block) {
+        Spec sp;
+        switch(b.kind) {
+            case LKind::g: sp = n(b.param); break;
+            case LKind::L: sp = i(b.param); break;
+            case LKind::S: sp = s(b.param); break;
+            case LKind::I: sp = s(b.param); break;
+            default: sp = n(b.param); break;
+        }
+        nodes.push_back(G.add(sp));
+    }
+    
+    std::vector<NodeRef> sideNodes;
+    for (const auto& sl : T.side_links) {
+        sideNodes.push_back(G.add(s(sl.param)));
+    }
+    
+    std::vector<NodeRef> instNodes;
+    for (const auto& inst : T.instantons) {
+        instNodes.push_back(G.add(s(inst.param)));
+    }
+    
+    for (const auto& conn : T.l_connection) {
+        if (conn.u >= 0 && conn.u < (int)nodes.size() &&
+            conn.v >= 0 && conn.v < (int)nodes.size()) {
+            try {
+                G.connect(nodes[conn.u], nodes[conn.v]);
+            } catch (const std::exception&) {
+                throw;
+            }
+        }
+    }
+    
+    for (const auto& conn : T.s_connection) {
+        if (conn.u >= 0 && conn.u < (int)nodes.size() &&
+            conn.v >= 0 && conn.v < (int)sideNodes.size()) {
+            try {
+                G.connect(sideNodes[conn.v], nodes[conn.u]);
+            } catch (const std::exception&) {
+                throw;
+            }
+        }
+    }
+    
+    for (const auto& conn : T.i_connection) {
+        if (conn.u >= 0 && conn.u < (int)nodes.size() &&
+            conn.v >= 0 && conn.v < (int)instNodes.size()) {
+            try {
+                G.connect(instNodes[conn.v], nodes[conn.u]);
+            } catch (const std::exception&) {
+                throw;
+            }
+        }
+    }
+    
+    return G;
+}
+
+// ========== ✨ ADDED: Classification functions ==========
+bool is_LST(const TheoryGraph& G) {
+    // LST: Little String Theory
+    // Condition: Exactly ONE zero eigenvalue, all others negative
+    try {
+        auto IF = G.ComposeIF_Gluing();
+        if (IF.rows() == 0) return false;
+        
+        Tensor t;
+        t.SetIF(IF);
+        
+        auto eigenvalues = t.GetEigenvalues();
+        if (eigenvalues.size() == 0) return false;
+        
+        int zero_count = 0;
+        int negative_count = 0;
+        const double tol = 1e-8;
+        
+        for (int i = 0; i < eigenvalues.size(); i++) {
+            if (std::abs(eigenvalues(i)) < tol) {
+                zero_count++;
+            } else if (eigenvalues(i) < -tol) {
+                negative_count++;
+            } else {
+                return false;  // Positive eigenvalue
+            }
+        }
+        
+        return (zero_count == 1 && negative_count == eigenvalues.size() - 1);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool is_SCFT(const TheoryGraph& G) {
+    // SCFT: Superconformal Field Theory
+    // Condition: Negative definite (all eigenvalues negative)
+    try {
+        auto IF = G.ComposeIF_Gluing();
+        if (IF.rows() == 0) return false;
+        
+        Tensor t;
+        t.SetIF(IF);
+        
+        auto eigenvalues = t.GetEigenvalues();
+        if (eigenvalues.size() == 0) return false;
+        
+        const double tol = 1e-8;
+        
+        for (int i = 0; i < eigenvalues.size(); i++) {
+            if (eigenvalues(i) > -tol) {
+                return false;  // Non-negative eigenvalue
+            }
+        }
+        
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+// ========== Sharding utilities (✨ MODIFIED: added category parameter) ==========
 static std::string prefix_from(const Topology& T, int upto=4){
     std::string s; s.reserve(std::min<int>(upto, (int)T.block.size()));
     for (int i=0; i<(int)T.block.size() && i<upto; i++){
@@ -82,8 +211,9 @@ static std::string prefix_from(const Topology& T, int upto=4){
     return s.empty() ? "empty" : s;
 }
 
-static std::string shard_path_with_mode(const Topology& T, const std::string& outdir,
-                                        TargetSpec::PrefixMode mode, char kindTag, int u)
+static std::string shard_path_with_category(const Topology& T, const std::string& outdir,
+                                            TargetSpec::PrefixMode mode, char kindTag, 
+                                            int u, const std::string& category)
 {
     const int len = (int)T.block.size();
     std::string pref = prefix_from(T, 4);
@@ -94,10 +224,12 @@ static std::string shard_path_with_mode(const Topology& T, const std::string& ou
     if (mode == TargetSpec::PrefixMode::HeadKind && head) 
         pref = std::string(1, kindTag) + pref;
 
-    return outdir + "/len-" + std::to_string(len) + "/" + pref + ".txt";
+    std::string dir = outdir + "/" + category + "/len-" + std::to_string(len);  // ✨ MODIFIED: added category subdir
+    std::filesystem::create_directories(dir);
+    return dir + "/" + pref + ".txt";
 }
 
-// ========== 병렬 처리 구조 ==========
+// ========== Parallel processing structure ==========
 struct OutputBuffer {
     std::unordered_map<std::string, std::string> buffers;
     std::mutex mtx;
@@ -127,7 +259,7 @@ struct OutputBuffer {
     size_t size() const { return total_size.load(); }
 };
 
-// ========== Worker 스레드 ==========
+// ========== Worker pool ==========
 class WorkerPool {
 private:
     std::vector<std::thread> workers;
@@ -136,6 +268,7 @@ private:
     std::condition_variable cv;
     std::atomic<bool> stop{false};
     std::atomic<long long> processed{0};
+    std::atomic<long long> saved{0};
     
     OutputBuffer output_buffer;
     const std::string outDir;
@@ -168,6 +301,7 @@ public:
     }
 
     long long get_processed() const { return processed.load(); }
+    long long get_saved() const { return saved.load(); }
 
     void flush_if_needed() {
         if (output_buffer.size() > BUFFER_SIZE) {
@@ -191,7 +325,6 @@ private:
                 task_queue.pop();
             }
 
-            // 배치 처리
             for (const auto& base : batch) {
                 process_one(base);
             }
@@ -208,20 +341,37 @@ private:
 
             const int gval = base.block[u].param;
 
-            // S 장식
+            // S decoration
             if (spec.do_S) {
                 const auto& Sbank = allowed_S_params(gval);
                 for (int sp : Sbank) {
                     Topology t = base;
                     t.addDecoration(LKind::S, sp, u);
                     
-                    std::string path = shard_path_with_mode(t, outDir, spec.prefix, 'S', u);
-                    std::string line = serialize_line_compact(t);
-                    output_buffer.append(path, line);
+                    // ✨ ADDED: Classify and save only LST/SCFT
+                    try {
+                        TheoryGraph G = topology_to_theory_graph(t);
+                        std::string category;
+                        
+                        if (is_LST(G)) {
+                            category = "LST";
+                        } else if (is_SCFT(G)) {
+                            category = "SCFT";
+                        } else {
+                            continue; // ✨ ADDED: Skip if not LST or SCFT
+                        }
+                        
+                        std::string path = shard_path_with_category(t, outDir, spec.prefix, 'S', u, category);
+                        std::string line = serialize_line_compact(t);
+                        output_buffer.append(path, line);
+                        saved++;
+                    } catch (...) {
+                        // Failed to classify - skip
+                    }
                 }
             }
 
-            // I 장식
+            // I decoration
             if (spec.do_I) {
                 const auto& Ibank = allowed_I_params(gval);
                 int decoCount = 0;
@@ -231,9 +381,26 @@ private:
                     Topology t = base;
                     t.addDecoration(LKind::I, ip, u);
                     
-                    std::string path = shard_path_with_mode(t, outDir, spec.prefix, 'I', u);
-                    std::string line = serialize_line_compact(t);
-                    output_buffer.append(path, line);
+                    // ✨ ADDED: Classify and save only LST/SCFT
+                    try {
+                        TheoryGraph G = topology_to_theory_graph(t);
+                        std::string category;
+                        
+                        if (is_LST(G)) {
+                            category = "LST";
+                        } else if (is_SCFT(G)) {
+                            category = "SCFT";
+                        } else {
+                            continue;  // ✨ ADDED: Skip if not LST or SCFT
+                        }
+                        
+                        std::string path = shard_path_with_category(t, outDir, spec.prefix, 'I', u, category);
+                        std::string line = serialize_line_compact(t);
+                        output_buffer.append(path, line);
+                        saved++;
+                    } catch (...) {
+                        // Failed to classify - skip
+                    }
                     
                     ++decoCount;
                 }
@@ -242,7 +409,7 @@ private:
     }
 };
 
-// ========== 입력 처리 ==========
+// ========== Input processing ==========
 static InFmt parse_infmt(const std::string& s){
     if (s == "db") return InFmt::DB;
     if (s == "line") return InFmt::Line;
@@ -282,7 +449,7 @@ static TargetSpec::PrefixMode parse_prefix_arg(const std::string& arg){
     return TargetSpec::PrefixMode::None;
 }
 
-// ========== Line 파일 처리 ==========
+// ========== Line file processing ==========
 static long long process_line_file(const std::string& path, WorkerPool& pool){
     std::ifstream fin(path);
     if (!fin) {
@@ -309,7 +476,6 @@ static long long process_line_file(const std::string& path, WorkerPool& pool){
             batch.reserve(BATCH_SIZE);
             total += BATCH_SIZE;
             
-            // 진행상황 출력
             if (total % 50000 == 0) {
                 std::cout << "Read " << total << " topologies...\r" << std::flush;
             }
@@ -339,7 +505,7 @@ static long long process_line_path(const std::string& inPath, WorkerPool& pool){
     return total;
 }
 
-// ========== DB 처리 ==========
+// ========== DB processing ==========
 static long long process_db(const std::string& dbPath, WorkerPool& pool){
     TopologyDB db(dbPath);
     auto recs = db.loadAll();
@@ -371,7 +537,7 @@ static long long process_db(const std::string& dbPath, WorkerPool& pool){
     return total;
 }
 
-// ========== 메인 ==========
+// ========== Main ==========
 int main(int argc, char** argv)
 {
     if (argc < 3) {
@@ -381,14 +547,14 @@ int main(int argc, char** argv)
                   << "[--kinds S|I|S,I] "
                   << "[--prefix none|kind|head-kind] "
                   << "[--threads N]\n";
-        std::cerr << "\nExample: " << argv[0] << " input.txt out_dir --in line --kinds S --nodes 4\n";
+        std::cerr << "\nGenerates decorated topologies and saves only LST and SCFT.\n";
         return 1;
     }
 
     const std::string inPath = argv[1];
     const std::string outDir = argv[2];
 
-    TargetSpec Tspec;  // 기본값: all nodes, S+I, no prefix
+    TargetSpec Tspec;
     InFmt inFmt = InFmt::Auto;
     int num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0) num_threads = 4;
@@ -407,6 +573,7 @@ int main(int argc, char** argv)
     std::filesystem::create_directories(outDir);
 
     std::cout << "Starting with " << num_threads << " threads...\n";
+    std::cout << "Will save only LST and SCFT topologies.\n";
     
     WorkerPool pool(num_threads, outDir, Tspec);
     
@@ -417,7 +584,7 @@ int main(int argc, char** argv)
         input_count = process_db(inPath, pool);
     } else if (inFmt == InFmt::Line) {
         input_count = process_line_path(inPath, pool);
-    } else { // Auto
+    } else {
         if (std::filesystem::is_directory(inPath)) {
             input_count = process_line_path(inPath, pool);
         } else {
@@ -429,11 +596,11 @@ int main(int argc, char** argv)
         }
     }
 
-    // 모든 작업 완료 대기
     std::cout << "\nWaiting for workers to finish...\n";
     while (pool.get_processed() < input_count) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        std::cout << "Processed: " << pool.get_processed() << " / " << input_count << "\r" << std::flush;
+        std::cout << "Processed: " << pool.get_processed() << " / " << input_count 
+                  << " (Saved: " << pool.get_saved() << ")\r" << std::flush;
     }
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -442,8 +609,8 @@ int main(int argc, char** argv)
     std::cout << "\n\nCompleted!\n";
     std::cout << "Input: " << input_count << " topologies\n";
     std::cout << "Processed: " << pool.get_processed() << " topologies\n";
+    std::cout << "Saved (LST/SCFT only): " << pool.get_saved() << " topologies\n";
     std::cout << "Time: " << duration << " seconds\n";
-    std::cout << "Speed: " << (input_count / std::max(1LL, duration)) << " topologies/sec\n";
     std::cout << "Output dir: " << outDir << "\n";
 
     return 0;
