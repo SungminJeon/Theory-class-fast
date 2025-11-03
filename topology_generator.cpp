@@ -261,7 +261,13 @@ static std::string shard_path(const Topology& T, const std::string& outdir, cons
     return dir + "/" + pref + ".txt";
 }
 
-// ========== Unimodal check ==========
+// ========== Unimodal check (✨ MODIFIED: treat g=7 and g=8 as equivalent) ==========
+
+// ✨ ADDED: Normalize g values for gauge algebra equivalence (g=7 and g=8 are the same)
+static inline int normalize_g(int g) {
+    return (g == 7 || g == 8) ? 7 : g;  // Treat both 7 and 8 as 7
+}
+
 template<class T>
 static inline bool is_unimodal_non_strict(const std::vector<T>& a){
     const int n = (int)a.size();
@@ -275,7 +281,9 @@ static inline bool is_unimodal_non_strict(const std::vector<T>& a){
 static inline bool g_unimodal_prefix_ok(const Topology& T){
     std::vector<int> gvals; gvals.reserve(T.block.size());
     for (const auto& b : T.block){
-        if (b.kind == LKind::g) gvals.push_back(b.param);
+        if (b.kind == LKind::g) {
+            gvals.push_back(normalize_g(b.param));  // ✨ MODIFIED: normalize g values
+        }
     }
     return is_unimodal_non_strict(gvals);
 }
