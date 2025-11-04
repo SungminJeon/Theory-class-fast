@@ -1,4 +1,4 @@
-// classify_topology.cpp (fixed & fast)
+// classify_topology.cpp (✨ MODIFIED: output files named after input files)
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -22,7 +22,6 @@
 // ===== 유틸 =====
 static inline void ensure_linear_chain(const Topology& T,
                                        std::vector<InteriorStructure>& out_chain){
-    // Topology.h: l_connection 원소 타입은 InteriorStructure(u,v) :contentReference[oaicite:1]{index=1}
     if (!T.l_connection.empty()) { out_chain = T.l_connection; return; }
     const int n = (int)T.block.size();
     if (n <= 1) return;
@@ -50,7 +49,44 @@ static inline void flush_to_file(const std::string& path, const std::string& buf
     out.write(buf.data(), (std::streamsize)buf.size());
 }
 
-// ===== Topology -> TheoryGraph (참조 전달) =====
+// ✨ ADDED: Extract base filename without extension
+static inline std::string get_base_filename(const std::string& path){
+    std::filesystem::path p(path);
+    return p.stem().string();  // filename without extension
+}
+
+// ✨ ADDED: Get relative path from base directory and convert to safe filename
+static inline std::string get_safe_output_name(const std::string& fullPath, 
+                                                const std::string& baseDir){
+    std::filesystem::path full(fullPath);
+    std::filesystem::path base(baseDir);
+    
+    // Try to get relative path
+    std::string rel_path;
+    try {
+        auto rel = std::filesystem::relative(full, base);
+        rel_path = rel.string();
+    } catch (...) {
+        // If relative path fails, just use filename
+        rel_path = full.filename().string();
+    }
+    
+    // Replace directory separators and spaces with underscores
+    std::string safe_name = rel_path;
+    std::replace(safe_name.begin(), safe_name.end(), '/', '_');
+    std::replace(safe_name.begin(), safe_name.end(), '\\', '_');
+    std::replace(safe_name.begin(), safe_name.end(), ' ', '_');  // ✨ ADDED: handle spaces
+    
+    // Remove extension
+    auto ext_pos = safe_name.find_last_of('.');
+    if (ext_pos != std::string::npos) {
+        safe_name = safe_name.substr(0, ext_pos);
+    }
+    
+    return safe_name;
+}
+
+// ===== Topology -> TheoryGraph =====
 struct GraphBuildResult {
     TheoryGraph G;
 };
@@ -64,10 +100,10 @@ static GraphBuildResult build_graph_from_topology(const Topology& T){
         const auto& b = T.block[i];
         Spec sp;
         switch (b.kind){
-            case LKind::g: sp = Spec{Kind::Node,         b.param}; break;   // g -> Node
-            case LKind::L: sp = Spec{Kind::InteriorLink, b.param}; break;   // L -> InteriorLink
-            case LKind::S: sp = Spec{Kind::SideLink,     b.param}; break;   // 방어적 처리
-            case LKind::I: sp = Spec{Kind::SideLink,     b.param}; break;   // 방어적 처리
+            case LKind::g: sp = Spec{Kind::Node,         b.param}; break;
+            case LKind::L: sp = Spec{Kind::InteriorLink, b.param}; break;
+            case LKind::S: sp = Spec{Kind::SideLink,     b.param}; break;
+            case LKind::I: sp = Spec{Kind::SideLink,     b.param}; break;
         }
         nodeIdx_gL[i] = R.G.add(sp).id;
     }
@@ -81,32 +117,30 @@ static GraphBuildResult build_graph_from_topology(const Topology& T){
     for (size_t i=0; i<T.instantons.size(); ++i)
         nodeIdx_I[i] = R.G.add(Spec{Kind::SideLink, T.instantons[i].param}).id;
 
-    // 3) 연결 복원 (side Right -> node Left)
+    // 3) 연결 복원
     std::vector<InteriorStructure> chain;
-    ensure_linear_chain(T, chain);  // 자동 체인 복원
+    ensure_linear_chain(T, chain);
 
     for (auto e : chain)
-        R.G.connect(NodeRef{nodeIdx_gL.at(e.u)}, NodeRef{nodeIdx_gL.at(e.v)});   // g/L 체인
+        R.G.connect(NodeRef{nodeIdx_gL.at(e.u)}, NodeRef{nodeIdx_gL.at(e.v)});
 
-    for (auto e : T.s_connection)   // Topology.h: s_connection 원소 타입은 SideLinkStructure(u:node, v:sidelink) :contentReference[oaicite:2]{index=2}
-        R.G.connect(NodeRef{nodeIdx_S.at(e.v)}, NodeRef{nodeIdx_gL.at(e.u)});    // S -> g/L
+    for (auto e : T.s_connection)
+        R.G.connect(NodeRef{nodeIdx_S.at(e.v)}, NodeRef{nodeIdx_gL.at(e.u)});
 
-    for (auto e : T.i_connection)   // Topology.h: i_connection 원소 타입은 InstantonStructure(u:node, v:instanton) :contentReference[oaicite:3]{index=3}
-        R.G.connect(NodeRef{nodeIdx_I.at(e.v)}, NodeRef{nodeIdx_gL.at(e.u)});    // I -> g/L
+    for (auto e : T.i_connection)
+        R.G.connect(NodeRef{nodeIdx_I.at(e.v)}, NodeRef{nodeIdx_gL.at(e.u)});
 
     return R;
 }
 
 // ===== 빠른 판정 로직 =====
-// SCFT: IF의 모든 고윳값 < 0  ⇔  (-IF) 가 양의 definite
 static inline bool is_scft_fast(const Eigen::MatrixXi& IF){
     Eigen::MatrixXd A = (-IF).cast<double>();
-    A = 0.5*(A + A.transpose());                  // 수치 대칭화
+    A = 0.5*(A + A.transpose());
     Eigen::LLT<Eigen::MatrixXd> llt(A);
     return (llt.info()==Eigen::Success);
 }
 
-// LST: 정확히 하나만 0, 나머지는 모두 음수  ⇔  A=-IF 는 정확히 하나만 0, 나머지는 모두 양수
 static inline bool is_lst_fast_strict(const Eigen::MatrixXi& IF, double tol=1e-10){
     Eigen::MatrixXd A = (-IF).cast<double>();
     A = 0.5*(A + A.transpose());
@@ -122,7 +156,6 @@ static inline bool is_lst_fast_strict(const Eigen::MatrixXi& IF, double tol=1e-1
         else               ++zero;
     }
     const int n = (int)D.size();
-    // 엄격: 나머지 전부 양수, 정확히 하나만 0, 음수는 0개
     return (neg==0 && zero==1 && pos==n-1);
 }
 
@@ -134,50 +167,120 @@ static InFmt parse_infmt(const std::string& s){
     return InFmt::Auto;
 }
 
+// ✨ MODIFIED: process_line_file now takes base_name for output naming
 static long long process_line_file(const std::string& path,
-                                   const std::function<void(const Topology&)>& consume){
+                                   const std::string& outDir,
+                                   const std::string& base_name){
     std::ifstream fin(path);
     if (!fin){ std::cerr << "[skip] cannot open " << path << "\n"; return 0; }
-    long long cnt=0; std::string line;
+    
+    long long Nproc=0, Nscft=0, Nlst=0;
+    
+    // ✨ MODIFIED: Output files named after input file
+    const std::string out_scft = outDir + "/" + base_name + "_IF_SCFT.txt";
+    const std::string out_lst  = outDir + "/" + base_name + "_IF_LST.txt";
+    
+    std::string buf_scft; buf_scft.reserve(1<<22);
+    std::string buf_lst;  buf_lst .reserve(1<<22);
+    
+    auto flush_all = [&](){
+        flush_to_file(out_scft, buf_scft); buf_scft.clear();
+        flush_to_file(out_lst,  buf_lst);  buf_lst.clear();
+    };
+    
+    std::string line;
     while (std::getline(fin, line)){
         if (line.empty()) continue;
         Topology T;
         if (!deserialize_line_compact(line, T)) continue;
-        consume(T);
-        ++cnt;
+        
+        try{
+            auto R  = build_graph_from_topology(T);
+            Eigen::MatrixXi IF = R.G.ComposeIF_Gluing();
+
+            if (is_scft_fast(IF)) { append_matrix_txt_batch(buf_scft, IF); ++Nscft; }
+            else if (is_lst_fast_strict(IF)) { append_matrix_txt_batch(buf_lst, IF); ++Nlst; }
+
+            if ((++Nproc % 2000)==0) flush_all();
+        } catch (const std::exception& e){
+            std::cerr << "[Error] " << e.what() << " on topology " << T.name << "\n";
+        }
     }
-    return cnt;
+    
+    flush_all();
+    
+    std::cout << "File: " << base_name << " | Processed: " << Nproc
+              << " | SCFT: " << Nscft << " | LST: " << Nlst << "\n";
+    
+    return Nproc;
 }
 
+// ✨ MODIFIED: process_line_path now handles each file separately with directory structure preserved
 static long long process_line_path(const std::string& inPath,
-                                   const std::function<void(const Topology&)>& consume){
+                                   const std::string& outDir){
     long long total=0;
     if (std::filesystem::is_directory(inPath)){
+        // ✨ MODIFIED: Use safe output name that includes directory structure
         for (auto& e : std::filesystem::recursive_directory_iterator(inPath)){
-            if (e.is_regular_file() && e.path().extension()==".txt")
-                total += process_line_file(e.path().string(), consume);
+            if (e.is_regular_file() && e.path().extension()==".txt"){
+                std::string safe_name = get_safe_output_name(e.path().string(), inPath);
+                total += process_line_file(e.path().string(), outDir, safe_name);
+            }
         }
     } else {
-        total += process_line_file(inPath, consume);
+        std::string base_name = get_base_filename(inPath);
+        total += process_line_file(inPath, outDir, base_name);
     }
     return total;
 }
 
+// ✨ MODIFIED: process_db_file with base_name parameter
 static long long process_db_file(const std::string& dbPath,
-                                 const std::function<void(const Topology&)>& consume){
+                                const std::string& outDir,
+                                const std::string& base_name){
     TopologyDB db(dbPath);
-    long long cnt = 0;
+    
+    long long Nproc=0, Nscft=0, Nlst=0;
+    
+    // ✨ MODIFIED: Output files named after input file
+    const std::string out_scft = outDir + "/" + base_name + "_IF_SCFT.txt";
+    const std::string out_lst  = outDir + "/" + base_name + "_IF_LST.txt";
+    
+    std::string buf_scft; buf_scft.reserve(1<<22);
+    std::string buf_lst;  buf_lst .reserve(1<<22);
+    
+    auto flush_all = [&](){
+        flush_to_file(out_scft, buf_scft); buf_scft.clear();
+        flush_to_file(out_lst,  buf_lst);  buf_lst.clear();
+    };
+    
     for (auto& rec : db.loadAll()){
-        consume(rec.topo);
-        ++cnt;
+        try{
+            auto R  = build_graph_from_topology(rec.topo);
+            Eigen::MatrixXi IF = R.G.ComposeIF_Gluing();
+
+            if (is_scft_fast(IF)) { append_matrix_txt_batch(buf_scft, IF); ++Nscft; }
+            else if (is_lst_fast_strict(IF)) { append_matrix_txt_batch(buf_lst, IF); ++Nlst; }
+
+            if ((++Nproc % 2000)==0) flush_all();
+        } catch (const std::exception& e){
+            std::cerr << "[Error] " << e.what() << " on topology " << rec.topo.name << "\n";
+        }
     }
-    return cnt;
+    
+    flush_all();
+    
+    std::cout << "File: " << base_name << " | Processed: " << Nproc
+              << " | SCFT: " << Nscft << " | LST: " << Nlst << "\n";
+    
+    return Nproc;
 }
 
 // ===== 메인 =====
 int main(int argc, char** argv){
     if (argc < 3){
         std::cerr << "usage: " << argv[0] << " <input_path_or_dir> <out_dir> [--in line|db|auto]\n";
+        std::cerr << "  Output files will be named: <input_basename>_IF_SCFT.txt and <input_basename>_IF_LST.txt\n";
         return 1;
     }
     const std::string inPath = argv[1];
@@ -191,49 +294,25 @@ int main(int argc, char** argv){
         }
     }
 
-    long long Nproc=0, Nscft=0, Nlst=0;
-
-    // 배치 버퍼
-    std::string buf_scft; buf_scft.reserve(1<<22);
-    std::string buf_lst;  buf_lst .reserve(1<<22);
-    auto flush_all = [&](){
-        flush_to_file(outDir + "/IF_SCFT.txt", buf_scft); buf_scft.clear();
-        flush_to_file(outDir + "/IF_LST.txt" , buf_lst ); buf_lst.clear();
-    };
-
-    auto consume = [&](const Topology& T){
-        try{
-            // 그래프 & IF 1회
-            auto R  = build_graph_from_topology(T);
-            Eigen::MatrixXi IF = R.G.ComposeIF_Gluing();   // 여기서만 1회
-
-            // 빠른 판정
-            if (is_scft_fast(IF)) { append_matrix_txt_batch(buf_scft, IF); ++Nscft; }
-            else if (is_lst_fast_strict(IF)) { append_matrix_txt_batch(buf_lst, IF); ++Nlst; }
-
-            if ((++Nproc % 2000)==0) flush_all();  // 주기적 배치 flush
-        } catch (const std::exception& e){
-            std::cerr << "[Error] " << e.what() << " on topology " << T.name << "\n";
-        }
-    };
+    long long total = 0;
 
     if (inFmt==InFmt::DB) {
-        process_db_file(inPath, consume);
+        std::string base_name = get_base_filename(inPath);
+        total = process_db_file(inPath, outDir, base_name);
     } else if (inFmt==InFmt::Line || std::filesystem::is_directory(inPath)
                || std::filesystem::path(inPath).extension()==".txt") {
-        process_line_path(inPath, consume);
+        total = process_line_path(inPath, outDir);
     } else {
-        try { process_db_file(inPath, consume); }
-        catch (...) { process_line_path(inPath, consume); }
+        try { 
+            std::string base_name = get_base_filename(inPath);
+            total = process_db_file(inPath, outDir, base_name); 
+        }
+        catch (...) { 
+            total = process_line_path(inPath, outDir); 
+        }
     }
 
-    // 마지막 flush
-    flush_all();
-
-    std::cout << "Processed: " << Nproc
-              << " | SCFT: " << Nscft
-              << " | LST: "  << Nlst << "\n";
+    std::cout << "\nTotal processed: " << total << "\n";
     std::cout << "Output dir: " << outDir << "\n";
     return 0;
 }
-
