@@ -1,0 +1,4 @@
+# Exclude large result files
+IF_*/*.txt
+!IF_*/*.tar.gz
+!IF_*/*.zip
