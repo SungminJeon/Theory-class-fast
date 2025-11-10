@@ -133,30 +133,54 @@ static GraphBuildResult build_graph_from_topology(const Topology& T){
     return R;
 }
 
-// ===== 빠른 판정 로직 =====
-static inline bool is_scft_fast(const Eigen::MatrixXi& IF){
+// ===== 판정 로직 (✨ UPDATED: 실제 고유값 기반으로 변경) =====
+static inline bool is_scft_accurate(const Eigen::MatrixXi& IF, double tol=1e-8){
     Eigen::MatrixXd A = (-IF).cast<double>();
     A = 0.5*(A + A.transpose());
-    Eigen::LLT<Eigen::MatrixXd> llt(A);
-    return (llt.info()==Eigen::Success);
+    
+    // 실제 고유값 계산
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(A);
+    if (solver.info() != Eigen::Success) return false;
+    
+    const auto& evals = solver.eigenvalues();
+    
+    // SCFT: 모든 고유값이 양수 (negative definite -IF = positive definite)
+    for (int i = 0; i < evals.size(); ++i) {
+        if (evals(i) < tol) {
+            return false;  // Non-positive eigenvalue found
+        }
+    }
+    
+    return true;
 }
 
-static inline bool is_lst_fast_strict(const Eigen::MatrixXi& IF, double tol=1e-10){
+static inline bool is_lst_accurate(const Eigen::MatrixXi& IF, double tol=1e-8){
     Eigen::MatrixXd A = (-IF).cast<double>();
     A = 0.5*(A + A.transpose());
-    Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
-    if (ldlt.info()!=Eigen::Success) return false;
-
-    const auto D = ldlt.vectorD();
-    int pos=0, zero=0, neg=0;
-    for (int i=0;i<D.size();++i){
-        const double d = D(i);
-        if      (d >  tol) ++pos;
-        else if (d < -tol) ++neg;
-        else               ++zero;
+    
+    // 실제 고유값 계산
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(A);
+    if (solver.info() != Eigen::Success) return false;
+    
+    const auto& evals = solver.eigenvalues();
+    
+    // 고유값 분류
+    int pos = 0, zero = 0, neg = 0;
+    for (int i = 0; i < evals.size(); ++i) {
+        const double eval = evals(i);
+        if (std::abs(eval) < tol) {
+            ++zero;
+        } else if (eval > tol) {
+            ++pos;
+        } else {
+            ++neg;
+        }
     }
-    const int n = (int)D.size();
-    return (neg==0 && zero==1 && pos==n-1);
+    
+    const int n = (int)evals.size();
+    
+    // LST: 정확히 1개의 0 고유값, 나머지는 모두 양수
+    return (neg == 0 && zero == 1 && pos == n - 1);
 }
 
 // ===== 입력 처리 =====
@@ -198,8 +222,8 @@ static long long process_line_file(const std::string& path,
             auto R  = build_graph_from_topology(T);
             Eigen::MatrixXi IF = R.G.ComposeIF_Gluing();
 
-            if (is_scft_fast(IF)) { append_matrix_txt_batch(buf_scft, IF); ++Nscft; }
-            else if (is_lst_fast_strict(IF)) { append_matrix_txt_batch(buf_lst, IF); ++Nlst; }
+            if (is_scft_accurate(IF)) { append_matrix_txt_batch(buf_scft, IF); ++Nscft; }
+            else if (is_lst_accurate(IF)) { append_matrix_txt_batch(buf_lst, IF); ++Nlst; }
 
             if ((++Nproc % 2000)==0) flush_all();
         } catch (const std::exception& e){
@@ -259,8 +283,8 @@ static long long process_db_file(const std::string& dbPath,
             auto R  = build_graph_from_topology(rec.topo);
             Eigen::MatrixXi IF = R.G.ComposeIF_Gluing();
 
-            if (is_scft_fast(IF)) { append_matrix_txt_batch(buf_scft, IF); ++Nscft; }
-            else if (is_lst_fast_strict(IF)) { append_matrix_txt_batch(buf_lst, IF); ++Nlst; }
+            if (is_scft_accurate(IF)) { append_matrix_txt_batch(buf_scft, IF); ++Nscft; }
+            else if (is_lst_accurate(IF)) { append_matrix_txt_batch(buf_lst, IF); ++Nlst; }
 
             if ((++Nproc % 2000)==0) flush_all();
         } catch (const std::exception& e){
