@@ -1,0 +1,6 @@
+
+1. external port 추가
+2. 이상한 토폴로지들.. 사실 한가지 분류-> tensor decoupling condition을 만족하는지 체크. 왜 그런 토폴로지들이 가능하지?
+3. spectral analysis.. characteristic equation-> 느리지만 한번 해보자. 이렇게 해서 coeff 구하는게 그렇게 어렵지는 않을 것 같음.
+4. yuta 교수님의 결과와 비교 후 레이텍 표로 만들기. 넘버랑 스펙트럴 일치 여부만 우선 체크
+5. data 베이스 레이텍으로 번역하는 매스매티카 코드 짜기
