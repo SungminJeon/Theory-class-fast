@@ -183,6 +183,9 @@ inline Tensor build_tensor(const Spec& sp){
 			else if (sp.param == 957) {t.AT(-3); t.AT(-1); t.AT(-5); t.AT(-1); t.AT(-3); t.AT(-1); t.AT(-5); t.AT(-1); t.AT(-3); t.AT(-1); }
 
 
+			// alkali 1 links with one -5 curve (which is omitted in the appendix of atomic classification paper)
+			else if (sp.param == 958) {t.AT(-1); t.AT(-5); t.AT(-1); t.AT(-3);t.AT(-1);}
+
 
 
 
